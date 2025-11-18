@@ -125,7 +125,8 @@
             border-radius: 50%;
             margin-right: 10px;
             vertical-align: middle;
-            background: #4caf50;
+            background: #ccc; /* Default gray */
+            transition: background 0.3s;
         }
         
         .filter-btn.active {
@@ -164,7 +165,7 @@
             margin: 8px 0;
             background: #fafafa;
             border-radius: 8px;
-            border-left: 4px solid #4caf50;
+            border-left: 4px solid #ccc;
             cursor: pointer;
             transition: all 0.2s;
         }
@@ -193,12 +194,12 @@
             font-size: 10px;
             color: white;
             font-weight: bold;
-            background: #4caf50;
+            background: #999;
         }
         
         .nearby-item-distance {
             font-size: 13px;
-            color: #4caf50;
+            color: #666;
             font-weight: bold;
         }
         
@@ -239,10 +240,13 @@
             font-size: 13px;
         }
         
-        .alert-box.success {
-            background: #e8f5e9;
-            border-left-color: #4caf50;
-            color: #2e7d32;
+        /* Leaflet Popup Styles */
+        .leaflet-popup-content-wrapper {
+            border-radius: 8px;
+            box-shadow: 0 3px 14px rgba(0,0,0,0.2);
+        }
+        .leaflet-popup-content {
+            margin: 15px;
         }
     </style>
 </head>
@@ -264,16 +268,9 @@
                 2. 點擊地圖查看附近 2km 內的友善場所
             </div>
             
-            <div class="filter-section">
+            <div class="filter-section" id="filter-container">
                 <h3>📊 場所類別</h3>
-                <button class="filter-btn active" data-category="all">
-                    🔍 顯示全部
-                    <span class="count" id="count-all">0</span>
-                </button>
-                <button class="filter-btn" data-category="寵物友善">
-                    寵物友善場所
-                    <span class="count" id="count-pet">0</span>
-                </button>
+                <div style="color: #666; font-size: 13px; padding: 10px;">載入分類中...</div>
             </div>
             
             <div id="nearby-list"></div>
@@ -281,21 +278,39 @@
     </div>
     
     <div id="update-btn" class="map-control">
-        🔄 搜尋此區域的友善場所
+        🔄 搜尋此區域 (恢復顯示全部)
     </div>
     
     <div id="map"></div>
 
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <script>
+        // --- 配置設定 ---
         const SUPABASE_URL = 'https://ccbspjdjgranbpyomxrp.supabase.co';
         const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImNjYnNwamRqZ3JhbmJweW9teHJwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjMzNjk2NTMsImV4cCI6MjA3ODk0NTY1M30.MLSBxYsSIwK3xWQto0bmagP-zKGHBC2z8i-hyV87CY8';
 
+        // --- 🎨 色彩定義 (R6: 定義視覺系統) ---
+        const categoryColors = {
+            '餐廳': '#FF9800',       // 橘色 (餐飲)
+            'cafe': '#795548',       // 棕色 (咖啡)
+            '咖啡廳': '#795548',     // 棕色 (咖啡)
+            '寵物旅館': '#9C27B0',   // 紫色 (住宿)
+            '寵物友善飯店': '#9C27B0',// 紫色 (住宿)
+            '寵物醫院': '#F44336',   // 紅色 (醫療)
+            '寵物美容': '#E91E63',   // 粉色 (美容)
+            '狗狗公園': '#4CAF50',   // 綠色 (戶外)
+            '室外空間': '#4CAF50',            
+            '文創園區': '#607D8B',   // 藍灰 (其他)
+            'default': '#888888'     // 灰色 (未知)
+        };
+
+        // --- 地圖初始化 ---
         const map = L.map('map').setView([25.0330, 121.5654], 13);
         L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
             attribution: '© OpenStreetMap'
         }).addTo(map);
 
+        // --- 狀態變數 ---
         let visiblePlaces = [];
         let markers = [];
         let searchMarker = null;
@@ -303,6 +318,11 @@
         let activeFilters = ['all'];
         let lastLoadedBounds = null;
         let isLoading = false;
+
+        // --- 輔助函式：取得顏色 ---
+        function getColor(category) {
+            return categoryColors[category] || categoryColors['default'];
+        }
 
         function createIcon(color = '#4caf50', size = 12) {
             return L.divIcon({
@@ -313,27 +333,43 @@
             });
         }
 
+        // 側邊欄切換
         document.getElementById('toggle-btn').addEventListener('click', () => {
             document.getElementById('sidebar').classList.toggle('collapsed');
         });
 
+        // --- 核心功能：載入資料 ---
         async function loadVisiblePlaces() {
             if (isLoading) return;
             isLoading = true;
             
+            // 清除搜尋狀態 (恢復顯示全部)
+            if (searchMarker) {
+                map.removeLayer(searchMarker);
+                searchMarker = null;
+            }
+            if (searchCircle) {
+                map.removeLayer(searchCircle);
+                searchCircle = null;
+            }
+            document.getElementById('nearby-list').innerHTML = '';
+
             const bounds = map.getBounds();
             const ne = bounds.getNorthEast();
             const sw = bounds.getSouthWest();
             
             try {
-                const response = await fetch(`${SUPABASE_URL}/rest/v1/places?select=*`, {
+                const response = await fetch(`${SUPABASE_URL}/rest/v1/pet_places?select=*`, {
                     headers: {
                         'apikey': SUPABASE_KEY,
                         'Authorization': `Bearer ${SUPABASE_KEY}`
                     }
                 });
                 
+                if (!response.ok) throw new Error(`API Error: ${response.status}`);
+
                 const allData = await response.json();
+                
                 visiblePlaces = allData.filter(p => 
                     p.lat && p.lng &&
                     p.lat >= sw.lat && p.lat <= ne.lat &&
@@ -341,44 +377,114 @@
                 );
 
                 lastLoadedBounds = bounds;
-                updateCounts();
-                displayPlaces();
+                
+                renderFilters();
+                displayPlaces(); // 預設顯示所有載入的資料
+                
                 document.getElementById('update-btn').classList.remove('show');
                 document.getElementById('status').textContent = `✅ 已載入 ${visiblePlaces.length} 個友善場所`;
 
             } catch (error) {
                 console.error('載入失敗:', error);
-                document.getElementById('status').innerHTML = `<span style="color: #d32f2f;">載入失敗,請重試</span>`;
+                document.getElementById('status').innerHTML = `<span style="color: #d32f2f;">載入失敗: ${error.message}</span>`;
             }
             
             isLoading = false;
         }
 
-        function updateCounts() {
-            document.getElementById('count-all').textContent = visiblePlaces.length;
-            document.getElementById('count-pet').textContent = visiblePlaces.filter(p => p.category === '寵物友善').length;
+        // --- 動態篩選邏輯 ---
+        function renderFilters() {
+            const container = document.getElementById('filter-container');
+            const categories = [...new Set(visiblePlaces.map(p => p.category || '未分類'))].sort();
+
+            let html = '<h3>📊 場所類別</h3>';
+
+            // "全部" 按鈕
+            const isAllActive = activeFilters.includes('all');
+            html += `
+                <button class="filter-btn ${isAllActive ? 'active' : ''}" data-category="all">
+                    🔍 顯示全部
+                    <span class="count">${visiblePlaces.length}</span>
+                </button>
+            `;
+
+            // 各類別按鈕
+            categories.forEach(cat => {
+                const count = visiblePlaces.filter(p => (p.category || '未分類') === cat).length;
+                const isActive = activeFilters.includes(cat);
+                const color = getColor(cat); // 取得該類別顏色
+                
+                if (count > 0) {
+                    // 這裡我們動態設定按鈕前的圓點顏色
+                    html += `
+                        <button class="filter-btn ${isActive ? 'active' : ''}" data-category="${cat}" style="--btn-color: ${color}">
+                            <span style="display:inline-block;width:10px;height:10px;background:${color};border-radius:50%;margin-right:8px;"></span>
+                            ${cat}
+                            <span class="count">${count}</span>
+                        </button>
+                    `;
+                }
+            });
+
+            container.innerHTML = html;
+            container.querySelectorAll('.filter-btn').forEach(btn => {
+                btn.addEventListener('click', handleFilterClick);
+            });
         }
 
-        function displayPlaces() {
+        function handleFilterClick(e) {
+            const btn = e.currentTarget;
+            const category = btn.dataset.category;
+
+            if (category === 'all') {
+                activeFilters = ['all'];
+            } else {
+                if (activeFilters.includes('all')) activeFilters = [];
+                if (activeFilters.includes(category)) {
+                    activeFilters = activeFilters.filter(c => c !== category);
+                } else {
+                    activeFilters.push(category);
+                }
+                if (activeFilters.length === 0) activeFilters = ['all'];
+            }
+
+            renderFilters();
+            // 點擊篩選時，如果正在搜尋模式下，依然使用 visiblePlaces (為了簡單起見，切換篩選會重置搜尋範圍顯示，或你可以選擇保留)
+            // 這裡我們選擇：切換篩選後，顯示所有符合篩選的點 (不論距離)
+            displayPlaces(); 
+        }
+
+        // --- 📍 地圖顯示邏輯 (R6: 核心修改) ---
+        // 新增參數: sourceData，預設為 visiblePlaces
+        // 如果傳入 sourceData (例如搜尋結果)，就只顯示這些資料
+        function displayPlaces(sourceData = null) {
+            // 1. 清除舊標記
             markers.forEach(m => map.removeLayer(m.marker));
             markers = [];
 
-            const filtered = activeFilters.includes('all') 
-                ? visiblePlaces 
-                : visiblePlaces.filter(p => activeFilters.includes(p.category));
+            // 2. 決定要顯示哪些資料 (全部 vs 搜尋結果)
+            let targetData = sourceData || visiblePlaces;
 
+            // 3. 套用類別篩選
+            const filtered = activeFilters.includes('all') 
+                ? targetData 
+                : targetData.filter(p => activeFilters.includes(p.category || '未分類'));
+
+            // 4. 繪製標記
             filtered.forEach(place => {
+                const color = getColor(place.category); // 取得對應顏色
+
                 const marker = L.marker([place.lat, place.lng], { 
-                    icon: createIcon('#4caf50')
+                    icon: createIcon(color) // 使用不同顏色
                 }).addTo(map);
 
                 marker.bindPopup(`
                     <div style="min-width: 220px;">
-                        <h3 style="margin: 0 0 8px 0; color: #4caf50; font-size: 15px;">${place.name}</h3>
+                        <h3 style="margin: 0 0 8px 0; color: ${color}; font-size: 15px;">${place.name}</h3>
                         <div style="margin-bottom: 8px;">
-                            <span class="category-badge">${place.category || '寵物友善'}</span>
+                            <span class="category-badge" style="background:${color}">${place.category || '未分類'}</span>
                         </div>
-                        <div style="font-size: 13px;">📍 ${place.address || ''}</div>
+                        <div style="font-size: 13px; margin-bottom: 4px;">📍 ${place.address || '無地址資訊'}</div>
                     </div>
                 `);
 
@@ -386,6 +492,7 @@
             });
         }
 
+        // --- 工具函式：計算距離 ---
         function calculateDistance(lat1, lng1, lat2, lng2) {
             const R = 6371000;
             const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -397,20 +504,21 @@
             return R * c;
         }
 
+        // --- 🔍 搜尋附近功能 (R6: 實作隱藏範圍外標記) ---
         function searchNearby(lat, lng) {
             if (searchMarker) map.removeLayer(searchMarker);
             if (searchCircle) map.removeLayer(searchCircle);
 
             searchMarker = L.marker([lat, lng], {
-                icon: createIcon('#ff9800', 16)
-            }).addTo(map).bindPopup('📍 搜尋位置').openPopup();
+                icon: createIcon('#333', 16) // 搜尋中心用深色標記
+            }).addTo(map).bindPopup('📍 搜尋中心').openPopup();
 
             searchCircle = L.circle([lat, lng], {
                 radius: 2000,
-                color: '#4caf50',
-                fillColor: '#4caf50',
-                fillOpacity: 0.1,
-                weight: 2
+                color: '#333',
+                fillColor: '#333',
+                fillOpacity: 0.05,
+                weight: 1
             }).addTo(map);
 
             const nearby = [];
@@ -423,63 +531,48 @@
 
             nearby.sort((a, b) => a.distance - b.distance);
 
+            // 更新列表
             const listDiv = document.getElementById('nearby-list');
             if (nearby.length === 0) {
                 listDiv.innerHTML = '<div class="alert-box">附近 2 公里內暫無資料</div>';
             } else {
                 listDiv.innerHTML = `
-                    <div class="nearby-header">🐾 附近 2km 內找到 ${nearby.length} 個友善場所</div>
+                    <div class="nearby-header">🐾 附近 2km 內找到 ${nearby.length} 個場所</div>
                     ${nearby.map(p => `
-                        <div class="nearby-item" onclick="map.setView([${p.lat}, ${p.lng}], 16)">
+                        <div class="nearby-item" onclick="map.setView([${p.lat}, ${p.lng}], 16)" style="border-left-color: ${getColor(p.category)}">
                             <div class="nearby-item-name">${p.name}</div>
                             <div class="nearby-item-category">
-                                <span class="category-badge">${p.category || '寵物友善'}</span>
+                                <span class="category-badge" style="background:${getColor(p.category)}">${p.category || '未分類'}</span>
                             </div>
                             <div class="nearby-item-distance">📏 距離: ${Math.round(p.distance)}m</div>
                         </div>
                     `).join('')}
                 `;
             }
+
+            // 🔥 關鍵修改：只顯示附近的點 (傳入 nearby 陣列)
+            displayPlaces(nearby);
+            
+            // 顯示提示按鈕，讓使用者知道可以點擊重置
+            document.getElementById('update-btn').classList.add('show');
         }
 
-        document.querySelectorAll('.filter-btn').forEach(btn => {
-            btn.addEventListener('click', () => {
-                const category = btn.dataset.category;
-                
-                if (category === 'all') {
-                    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
-                    btn.classList.add('active');
-                    activeFilters = ['all'];
-                } else {
-                    document.querySelector('[data-category="all"]').classList.remove('active');
-                    btn.classList.toggle('active');
-                    
-                    activeFilters = Array.from(document.querySelectorAll('.filter-btn.active'))
-                        .map(b => b.dataset.category)
-                        .filter(c => c !== 'all');
-                    
-                    if (activeFilters.length === 0) {
-                        activeFilters = ['all'];
-                        document.querySelector('[data-category="all"]').classList.add('active');
-                    }
-                }
-                
-                displayPlaces();
-            });
-        });
-
+        // --- 事件監聽 ---
         let moveTimeout;
         map.on('moveend', () => {
-            clearTimeout(moveTimeout);
-            moveTimeout = setTimeout(() => {
-                if (!lastLoadedBounds || !map.getBounds().intersects(lastLoadedBounds)) {
-                    document.getElementById('update-btn').classList.add('show');
-                }
-            }, 500);
+            // 只有在"非"搜尋模式下 (也就是沒有搜尋圓圈時)，才提示更新
+            if (!searchCircle) {
+                clearTimeout(moveTimeout);
+                moveTimeout = setTimeout(() => {
+                    if (!lastLoadedBounds || !map.getBounds().intersects(lastLoadedBounds)) {
+                        document.getElementById('update-btn').classList.add('show');
+                    }
+                }, 500);
+            }
         });
 
         document.getElementById('update-btn').addEventListener('click', () => {
-            loadVisiblePlaces();
+            loadVisiblePlaces(); // 這會重置搜尋狀態並載入新邊界資料
         });
 
         map.on('click', (e) => {
